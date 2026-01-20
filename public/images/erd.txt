@@ -1,0 +1,96 @@
+@startuml
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Inter
+skinparam ArrowColor #444444
+skinparam BorderColor #444444
+
+title Entity Relationship Diagram – VocalizeWeb Platform
+
+' ============================
+' ENTITIES
+' ============================
+
+entity Admin {
+  admin_id
+  name
+  email
+}
+
+entity Client {
+  client_id
+  organization_name
+  status
+}
+
+entity ClientPortal {
+  portal_id
+  created_at
+}
+
+entity KnowledgeSource {
+  source_id
+  type
+  uploaded_at
+}
+
+entity VectorEmbedding {
+  embedding_id
+  created_at
+}
+
+entity Plugin {
+  plugin_id
+  framework
+  issued_at
+}
+
+entity APIKey {
+  api_key
+  issued_at
+  status
+}
+
+entity EndUser {
+  user_id
+}
+
+entity Session {
+  session_id
+  started_at
+  ended_at
+}
+
+entity QueryLog {
+  log_id
+  query_type
+  user_query
+  ai_response
+  timestamp
+}
+
+' ============================
+' RELATIONSHIPS
+' ============================
+
+Admin ||--o{ Client : manages
+Admin ||--o{ KnowledgeSource : preprocesses
+Admin ||--o{ Plugin : issues
+Admin ||--o{ APIKey : generates
+
+Client ||--|| ClientPortal : has
+Client ||--o{ KnowledgeSource : provides
+Client ||--|| Plugin : uses
+Client ||--|| APIKey : owns
+Client ||--o{ Session : has
+
+KnowledgeSource ||--o{ VectorEmbedding : produces
+
+Session ||--o{ QueryLog : contains
+EndUser ||--o{ Session : initiates
+
+Client ||--o{ QueryLog : views
+Admin ||--o{ QueryLog : monitors
+
+@enduml
