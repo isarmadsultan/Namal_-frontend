@@ -19,6 +19,8 @@ const VoiceAssistantWithBackend = () => {
     const audioElementRef = useRef(null);
 
     const BACKEND_URL = `http://${window.location.hostname}:8000`;
+    const API_KEY = process.env.REACT_APP_WIDGET_API_KEY || '';
+    const API_HEADERS = { 'X-API-Key': API_KEY };
 
     // Auto scroll to bottom
     useEffect(() => {
@@ -161,9 +163,10 @@ const VoiceAssistantWithBackend = () => {
             const formData = new FormData();
             formData.append('file', audioBlob, 'recording.webm');
 
-            const response = await axios.post(`${BACKEND_URL}/upload-voice/`, formData, {
+            const response = await axios.post(`${BACKEND_URL}/widget/voice`, formData, {
                 headers: {
                     'Content-Type': 'multipart/form-data',
+                    ...API_HEADERS,
                 },
             });
 
@@ -178,12 +181,16 @@ const VoiceAssistantWithBackend = () => {
             // Add AI response
             setMessages(prev => [...prev, {
                 type: 'assistant',
-                text: data.ai_response
+                text: data.answer
             }]);
 
-            // Play audio response
-            if (data.tts_audio_paths && data.tts_audio_paths.length > 0) {
-                await playAudioSequence(data.tts_audio_paths);
+            // Play audio response if available
+            if (data.audio_base64) {
+                const audioBytes = Uint8Array.from(atob(data.audio_base64), c => c.charCodeAt(0));
+                const blob = new Blob([audioBytes], { type: 'audio/wav' });
+                const url = URL.createObjectURL(blob);
+                await playAudio(url);
+                URL.revokeObjectURL(url);
             }
 
             setTranscript('');
@@ -255,16 +262,14 @@ const VoiceAssistantWithBackend = () => {
         try {
             // For chat mode, you could create a text-only endpoint
             // For now, we'll use a simple approach
-            const response = await axios.post(`${BACKEND_URL}/chat/`, {
+            const response = await axios.post(`${BACKEND_URL}/widget/chat`, {
                 message: userMessage
+            }, {
+                headers: API_HEADERS,
             });
 
-            const aiResponse = response.data.response;
+            const aiResponse = response.data.answer;
             setMessages(prev => [...prev, { type: 'assistant', text: aiResponse }]);
-
-            if (mode === 'voice' && response.data.audio_path) {
-                await playAudio(response.data.audio_path);
-            }
         } catch (error) {
             console.error('Error sending message:', error);
             setMessages(prev => [...prev, {

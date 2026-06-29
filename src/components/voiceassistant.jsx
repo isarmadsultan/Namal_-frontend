@@ -1,152 +1,201 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Mic, MicOff, Send, X, Volume2, VolumeX, MessageSquare, Phone } from 'lucide-react';
 
+const API_KEY = 'vrag_1bed96b01430d58cfc4245ea1b0c2292eeee4aad0cb9cb25';
+const API_URL = 'http://localhost:8000';
+
 const VoiceAssistant = () => {
     const [isOpen, setIsOpen] = useState(false);
     const [mode, setMode] = useState('voice'); // 'voice' or 'chat'
     const [isListening, setIsListening] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
+    const [isLoading, setIsLoading] = useState(false);
     const [messages, setMessages] = useState([
         { type: 'assistant', text: 'Hello! I\'m Namal University\'s AI assistant. How can I help you today?' }
     ]);
     const [inputText, setInputText] = useState('');
     const [transcript, setTranscript] = useState('');
+    const [sessionId, setSessionId] = useState(null);
     const messagesEndRef = useRef(null);
-    const recognitionRef = useRef(null);
-    const synthRef = useRef(null);
-
-    // Initialize speech recognition and synthesis
-    useEffect(() => {
-        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            recognitionRef.current = new SpeechRecognition();
-            recognitionRef.current.continuous = true;
-            recognitionRef.current.interimResults = true;
-            recognitionRef.current.lang = 'en-US';
-
-            recognitionRef.current.onresult = (event) => {
-                let interimTranscript = '';
-                let finalTranscript = '';
-
-                for (let i = event.resultIndex; i < event.results.length; i++) {
-                    const transcript = event.results[i][0].transcript;
-                    if (event.results[i].isFinal) {
-                        finalTranscript += transcript + ' ';
-                    } else {
-                        interimTranscript += transcript;
-                    }
-                }
-
-                setTranscript(finalTranscript || interimTranscript);
-
-                if (finalTranscript) {
-                    handleVoiceMessage(finalTranscript.trim());
-                }
-            };
-
-            recognitionRef.current.onerror = (event) => {
-                console.error('Speech recognition error:', event.error);
-                setIsListening(false);
-            };
-        }
-
-        synthRef.current = window.speechSynthesis;
-
-        return () => {
-            if (recognitionRef.current) {
-                recognitionRef.current.stop();
-            }
-            if (synthRef.current) {
-                synthRef.current.cancel();
-            }
-        };
-    }, []);
+    const audioRef = useRef(null);
+    const mediaRecorderRef = useRef(null);
+    const audioChunksRef = useRef([]);
 
     // Auto scroll to bottom
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    const toggleListening = () => {
-        if (isListening) {
-            recognitionRef.current?.stop();
-            setIsListening(false);
-            setTranscript('');
-        } else {
-            recognitionRef.current?.start();
-            setIsListening(true);
-        }
-    };
-
-    const speakText = (text) => {
-        if (synthRef.current && mode === 'voice') {
-            synthRef.current.cancel();
-            const utterance = new SpeechSynthesisUtterance(text);
-            utterance.rate = 1.0;
-            utterance.pitch = 1.0;
-            utterance.volume = 1.0;
-
-            utterance.onstart = () => setIsSpeaking(true);
-            utterance.onend = () => setIsSpeaking(false);
-
-            synthRef.current.speak(utterance);
-        }
-    };
-
     const stopSpeaking = () => {
-        if (synthRef.current) {
-            synthRef.current.cancel();
+        if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current.currentTime = 0;
             setIsSpeaking(false);
         }
     };
 
-    const handleVoiceMessage = (text) => {
-        const newMessage = { type: 'user', text };
-        setMessages(prev => [...prev, newMessage]);
-        setTranscript('');
-
-        // Simulate AI response
-        setTimeout(() => {
-            const response = getAIResponse(text);
-            setMessages(prev => [...prev, { type: 'assistant', text: response }]);
-            speakText(response);
-        }, 1000);
+    // Play base64 audio returned by the backend TTS
+    const playAudio = (base64Audio) => {
+        if (!base64Audio) return;
+        stopSpeaking();
+        const audio = new Audio(`data:audio/wav;base64,${base64Audio}`);
+        audioRef.current = audio;
+        audio.onplay = () => setIsSpeaking(true);
+        audio.onended = () => setIsSpeaking(false);
+        audio.onerror = () => setIsSpeaking(false);
+        audio.play().catch(console.error);
     };
 
+    // ── Text chat via streaming SSE ───────────────────────────────────
+    const sendChatMessage = async (text) => {
+        setIsLoading(true);
+        // Add a placeholder assistant message we'll fill token-by-token
+        setMessages(prev => [...prev, { type: 'assistant', text: '' }]);
+
+        try {
+            const res = await fetch(`${API_URL}/widget/chat/stream`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': API_KEY,
+                },
+                body: JSON.stringify({ message: text, session_id: sessionId }),
+            });
+
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || 'Request failed');
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let fullAnswer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed.startsWith('data: ')) continue;
+                    const json = trimmed.slice(6);
+                    if (json === '[DONE]') continue;
+                    try {
+                        const chunk = JSON.parse(json);
+                        if (chunk.type === 'token') {
+                            fullAnswer += chunk.content;
+                            setMessages(prev => {
+                                const updated = [...prev];
+                                updated[updated.length - 1] = { type: 'assistant', text: fullAnswer };
+                                return updated;
+                            });
+                        }
+                        if (chunk.type === 'done' && chunk.conversation_id) {
+                            setSessionId(chunk.conversation_id);
+                        }
+                    } catch {}
+                }
+            }
+        } catch (err) {
+            setMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { type: 'assistant', text: `Error: ${err.message}` };
+                return updated;
+            });
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    // ── Voice: record → send to backend STT+RAG+TTS ──────────────────
+    const startRecording = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioChunksRef.current = [];
+            const recorder = new MediaRecorder(stream);
+            mediaRecorderRef.current = recorder;
+
+            recorder.ondataavailable = (e) => {
+                if (e.data.size > 0) audioChunksRef.current.push(e.data);
+            };
+
+            recorder.onstop = async () => {
+                stream.getTracks().forEach(t => t.stop());
+                const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+                await sendVoiceMessage(blob);
+            };
+
+            recorder.start();
+            setIsListening(true);
+        } catch (err) {
+            console.error('Mic error:', err);
+            alert('Microphone access denied. Please allow microphone and try again.');
+        }
+    };
+
+    const stopRecording = () => {
+        mediaRecorderRef.current?.stop();
+        setIsListening(false);
+        setTranscript('');
+    };
+
+    const toggleListening = () => {
+        if (isListening) {
+            stopRecording();
+        } else {
+            startRecording();
+        }
+    };
+
+    const sendVoiceMessage = async (audioBlob) => {
+        setIsLoading(true);
+        try {
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'recording.webm');
+            if (sessionId) formData.append('session_id', sessionId);
+
+            const res = await fetch(`${API_URL}/widget/voice`, {
+                method: 'POST',
+                headers: { 'X-API-Key': API_KEY },
+                body: formData,
+            });
+
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || 'Voice request failed');
+            }
+
+            const data = await res.json();
+            if (data.session_id) setSessionId(data.session_id);
+
+            if (data.transcription) {
+                setMessages(prev => [...prev, { type: 'user', text: data.transcription }]);
+            }
+            if (data.answer) {
+                setMessages(prev => [...prev, { type: 'assistant', text: data.answer }]);
+            }
+            if (data.audio_base64) {
+                playAudio(data.audio_base64);
+            }
+        } catch (err) {
+            setMessages(prev => [...prev, { type: 'assistant', text: `Error: ${err.message}` }]);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    // ── Chat submit ───────────────────────────────────────────────────
     const handleChatMessage = (e) => {
         if (e) e.preventDefault();
-        if (!inputText.trim()) return;
-
-        const newMessage = { type: 'user', text: inputText };
-        setMessages(prev => [...prev, newMessage]);
+        if (!inputText.trim() || isLoading) return;
+        const text = inputText.trim();
+        setMessages(prev => [...prev, { type: 'user', text }]);
         setInputText('');
-
-        // Simulate AI response
-        setTimeout(() => {
-            const response = getAIResponse(inputText);
-            setMessages(prev => [...prev, { type: 'assistant', text: response }]);
-            if (mode === 'voice') {
-                speakText(response);
-            }
-        }, 1000);
-    };
-
-    const getAIResponse = (userMessage) => {
-        const message = userMessage.toLowerCase();
-
-        if (message.includes('admission')) {
-            return 'Admissions for 2026 are now open! We offer undergraduate and graduate programs in Engineering, Computer Science, Management Sciences, and more. Would you like to know about specific requirements?';
-        } else if (message.includes('program') || message.includes('course')) {
-            return 'Namal University offers BS programs in Computer Science, Electrical Engineering, Civil Engineering, Management Sciences, and more. We also have MS and PhD programs. Which field interests you?';
-        } else if (message.includes('fee') || message.includes('cost')) {
-            return 'Our fee structure varies by program. For detailed information about tuition fees and available scholarships, please visit our admissions office or check our website. We offer need-based financial aid to deserving students.';
-        } else if (message.includes('location') || message.includes('where')) {
-            return 'Namal University is located in Mianwali, Punjab, Pakistan. Our campus spans over 100 acres with state-of-the-art facilities.';
-        } else if (message.includes('contact')) {
-            return 'You can reach us at admissions@namal.edu.pk or call +92-459-220466. Our office hours are Monday to Friday, 9 AM to 5 PM.';
-        } else {
-            return 'I\'m here to help! You can ask me about admissions, programs, fees, campus facilities, or any other information about Namal University.';
-        }
+        sendChatMessage(text);
     };
 
     const handleKeyPress = (e) => {
@@ -204,8 +253,7 @@ const VoiceAssistant = () => {
                             onClick={() => {
                                 setIsOpen(false);
                                 stopSpeaking();
-                                if (isListening) recognitionRef.current?.stop();
-                                setIsListening(false);
+                                if (isListening) stopRecording();
                             }}
                             className="hover:bg-white/20 p-2 rounded-full transition-colors"
                         >
@@ -231,10 +279,7 @@ const VoiceAssistant = () => {
                         <button
                             onClick={() => {
                                 setMode('chat');
-                                if (isListening) {
-                                    recognitionRef.current?.stop();
-                                    setIsListening(false);
-                                }
+                                if (isListening) stopRecording();
                                 stopSpeaking();
                             }}
                             className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-all flex items-center justify-center gap-2 ${mode === 'chat'
